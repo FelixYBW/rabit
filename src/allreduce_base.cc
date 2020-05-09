@@ -12,6 +12,9 @@
 #include <cstring>
 #include <map>
 #include "allreduce_base.h"
+#include "rabit/internal/timer.h"
+#include <x86intrin.h>
+#include <iomanip>
 
 namespace rabit {
 
@@ -34,6 +37,8 @@ AllreduceBase::AllreduceBase(void) {
   version_number = 0;
   // 32 K items
   reduce_ring_mincount = 32 << 10;
+  // reduce 10K B at least each time
+  tree_reduce_minsize = 40 << 10;
   // tracker URL
   task_id = "NULL";
   err_link = NULL;
@@ -48,6 +53,11 @@ AllreduceBase::AllreduceBase(void) {
   env_vars.push_back("DMLC_TRACKER_PORT");
   env_vars.push_back("DMLC_WORKER_CONNECT_RETRY");
   env_vars.push_back("DMLC_WORKER_STOP_PROCESS_ON_ERROR");
+  env_vars.push_back("rabit_tree_reduce_minsize");
+  env_vars.push_back("rabit_reduce_ring_mincount");
+  env_vars.push_back("rabit_tracker_uri");
+  env_vars.push_back("rabit_print_traceview");
+  env_vars.push_back("rabit_set_min_rcv_size");
 }
 
 // initialization function
@@ -179,17 +189,31 @@ inline size_t ParseUnit(const char *name, const char *val) {
  * \param val parameter value
  */
 void AllreduceBase::SetParam(const char *name, const char *val) {
-  if (!strcmp(name, "rabit_tracker_uri")) tracker_uri = val;
+  if (!strcmp(name, "rabit_tracker_uri")){
+      tracker_uri = val;
+      std::cout << "overwrite tracker_uri " << tracker_uri << std::endl;
+  }
   if (!strcmp(name, "rabit_tracker_port")) tracker_port = atoi(val);
   if (!strcmp(name, "rabit_task_id")) task_id = val;
-  if (!strcmp(name, "DMLC_TRACKER_URI")) tracker_uri = val;
+  if (val != "NULL")
+	if (!strcmp(name, "DMLC_TRACKER_URI")) tracker_uri = val;
   if (!strcmp(name, "DMLC_TRACKER_PORT")) tracker_port = atoi(val);
   if (!strcmp(name, "DMLC_TASK_ID")) task_id = val;
   if (!strcmp(name, "DMLC_ROLE")) dmlc_role = val;
   if (!strcmp(name, "rabit_world_size")) world_size = atoi(val);
   if (!strcmp(name, "rabit_hadoop_mode")) hadoop_mode = utils::StringToBool(val);
+  if (!strcmp(name, "rabit_tree_reduce_minsize")){
+	  tree_reduce_minsize =  atoi(val);
+	  std::cout << "set tree_reduce_minsize to " << tree_reduce_minsize << std::endl;
+  }
+  if (!strcmp(name, "rabit_print_traceview")) print_traceview = utils::StringToBool(val);
+  if (!strcmp(name, "rabit_set_min_rcv_size")) {
+	  set_min_rcv_size = utils::StringToBool(val);
+	  std::cout << "set set_min_rcv_size to " << set_min_rcv_size << std::endl;
+  }
   if (!strcmp(name, "rabit_reduce_ring_mincount")) {
     reduce_ring_mincount = atoi(val);
+    std::cout << "set reduce_ring_mincount to " << reduce_ring_mincount << std::endl;
     utils::Assert(reduce_ring_mincount > 0, "rabit_reduce_ring_mincount should be greater than 0");
   }
   if (!strcmp(name, "rabit_reduce_buffer")) {
@@ -304,6 +328,9 @@ bool AllreduceBase::ReConnectLinks(const char *cmd) {
     if (rank == -1) exit(-1);
 
     fprintf(stdout, "task %s got new rank %d\n", task_id.c_str(), rank);
+    
+	std::cout << "reconnectlinks rank = " << rank << " taskid = " << task_id << std::endl;
+
 
     Assert(tracker.RecvAll(&num_neighbors, sizeof(num_neighbors)) == \
          sizeof(num_neighbors), "ReConnectLink failure 4");
@@ -437,6 +464,24 @@ bool AllreduceBase::ReConnectLinks(const char *cmd) {
       if (all_links[i].rank == prev_rank) ring_prev = &all_links[i];
       if (all_links[i].rank == next_rank) ring_next = &all_links[i];
     }
+    std::cout << "before sort parent_rank= " << parent_index << " ranks= ";
+    
+    std::for_each(tree_links.plinks.begin(),tree_links.plinks.end(),[](const LinkRecord *a){ std::cout << a->rank << " ";});
+    std::cout << std::endl;
+
+	std::sort(tree_links.plinks.begin(),tree_links.plinks.end(),[](const LinkRecord * a, const LinkRecord * b) {
+        return a->rank > b->rank;   
+    });
+    parent_index = std::distance(tree_links.plinks.begin(),
+            std::find_if(tree_links.plinks.begin(),tree_links.plinks.end(),[this](const LinkRecord* a){return a->rank == this->parent_rank;}));
+    if (parent_index==tree_links.plinks.size())
+        parent_index=-1;
+    
+    std::cout << "after sort parent_rank= " << parent_index << " ranks= ";
+    
+    std::for_each(tree_links.plinks.begin(),tree_links.plinks.end(),[](const LinkRecord *a){ std::cout << a->rank << " ";});
+    std::cout << std::endl;
+
     Assert(parent_rank == -1 || parent_index != -1,
            "cannot find parent in the link");
     Assert(prev_rank == -1 || ring_prev != NULL,
@@ -469,11 +514,25 @@ AllreduceBase::TryAllreduce(void *sendrecvbuf_,
                             size_t type_nbytes,
                             size_t count,
                             ReduceFunction reducer) {
-  if (count > reduce_ring_mincount) {
-    return this->TryAllreduceRing(sendrecvbuf_, type_nbytes, count, reducer);
-  } else {
-    return this->TryAllreduceTree(sendrecvbuf_, type_nbytes, count, reducer);
-  }
+
+//	uint64_t start = __rdtsc();
+    double start=0;
+    if(print_traceview) start=utils::GetTime();
+    AllreduceBase::ReturnType ret;
+    if (count > reduce_ring_mincount) {
+		ret = this->TryAllreduceRing(sendrecvbuf_, type_nbytes, count, reducer);
+	} else {
+		ret = this->TryAllreduceTree(sendrecvbuf_, type_nbytes, count, reducer);
+	}
+    if(print_traceview){
+      double end = utils::GetTime();
+      double delta = end - start;
+//	uint64_t end = __rdtsc();
+//	uint64_t delta = end - start;
+
+      std::cout << "xgbtck allreduce " << " " << rank << " " << std::setprecision (17) << start << " " << delta << " " << type_nbytes*count << std::endl;
+    }
+	return ret;
 }
 /*!
  * \brief perform in-place allreduce, on sendrecvbuf,
@@ -505,6 +564,9 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
   size_t size_up_out = 0;
   // size of message we received, and send in the down pass
   size_t size_down_in = 0;
+      
+  size_t eachreduce = (tree_reduce_minsize / type_nbytes * type_nbytes);
+
   // initialize the link ring-buffer and pointer
   for (int i = 0; i < nlink; ++i) {
     if (i != parent_index) {
@@ -520,7 +582,6 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
   while (true) {
     // select helper
     bool finished = true;
-    utils::PollHelper watcher;
     for (int i = 0; i < nlink; ++i) {
       if (i == parent_index) {
         if (size_down_in != total_size) {
@@ -550,7 +611,14 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
     // finish runing allreduce
     if (finished) break;
     // select must return
+    double start_time;
+    if(print_traceview) start_time=utils::GetTime();
     watcher.Poll();
+    if(print_traceview){
+      double end_time = utils::GetTime();
+      double delta = end_time - start_time;
+	  std::cout << "xgbtck poll " << " " << rank << " " << std::setprecision (17) << start_time << " " << delta << " " << "-1" << std::endl;
+    }
     // exception handling
     for (int i = 0; i < nlink; ++i) {
       // recive OOB message from some link
@@ -583,6 +651,7 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
       utils::Assert(buffer_size != 0, "must assign buffer_size");
       // round to type_n4bytes
       max_reduce = (max_reduce / type_nbytes * type_nbytes);
+ 
       // peform reduce, can be at most two rounds
       while (size_up_reduce < max_reduce) {
         // start position
@@ -590,23 +659,38 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
         // peform read till end of buffer
         size_t nread = std::min(buffer_size - start,
                                 max_reduce - size_up_reduce);
+        if (nread<eachreduce && (size_up_reduce+nread)<total_size)
+        {
+            break;
+        }
+        nread = std::min(eachreduce,total_size-size_up_reduce);
+
+        
         utils::Assert(nread % type_nbytes == 0, "Allreduce: size check");
         for (int i = 0; i < nlink; ++i) {
           if (i != parent_index) {
+            //double start_time=utils::GetTime();
             reducer(links[i].buffer_head + start,
                     sendrecvbuf + size_up_reduce,
                     static_cast<int>(nread / type_nbytes),
                     MPI::Datatype(type_nbytes));
+            //double end_time = utils::GetTime();
+            //double delta = end_time - start_time;
+	        if(print_traceview) std::cout << "xgbtck reducer " << " " << rank << " " << std::setprecision (17) << utils::GetTime() << " " << nread << " " << links[i].rank << std::endl;
+            //reducer takes very little time
           }
         }
         size_up_reduce += nread;
       }
     }
+
+    double uptime,downtime;
     if (parent_index != -1) {
       // pass message up to parent, can pass data that are already been reduced
       if (size_up_out < size_up_reduce) {
         ssize_t len = links[parent_index].sock.
             Send(sendrecvbuf + size_up_out, size_up_reduce - size_up_out);
+	    if(print_traceview) std::cout << "xgbtck parent_up " << " " << rank << " " << std::setprecision (17) << utils::GetTime() << " " << len << " " << links[parent_index].rank << std::endl;
         if (len != -1) {
           size_up_out += static_cast<size_t>(len);
         } else {
@@ -619,22 +703,43 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
       // read data from parent
       if (watcher.CheckRead(links[parent_index].sock) &&
           total_size > size_down_in) {
-        ssize_t len = links[parent_index].sock.
-            Recv(sendrecvbuf + size_down_in, total_size - size_down_in);
-        if (len == 0) {
-          links[parent_index].sock.Close();
-          return ReportError(&links[parent_index], kRecvZeroLen);
-        }
-        if (len != -1) {
-          size_down_in += static_cast<size_t>(len);
-          utils::Assert(size_down_in <= size_up_out,
-                        "Allreduce: boundary error");
-        } else {
-          ReturnType ret = Errno2Return();
-          if (ret != kSuccess) {
-            return ReportError(&links[parent_index], ret);
+		size_t left_size=total_size-size_down_in;
+        size_t reduce_size_min=std::min(left_size, eachreduce);
+        size_t recved=0;
+        if(print_traceview) downtime=utils::GetTime();
+        while (recved<reduce_size_min)
+        {
+          ssize_t len = links[parent_index].sock.
+              Recv(sendrecvbuf + size_down_in, total_size - size_down_in);
+
+          if (len == 0) {
+
+            links[parent_index].sock.Close();
+            return ReportError(&links[parent_index], kRecvZeroLen);
           }
+          if (len != -1) {
+            size_down_in += static_cast<size_t>(len);
+            utils::Assert(size_down_in <= size_up_out,
+                          "Allreduce: boundary error");
+            recved+=len;
+
+			//if it receives more data than each reduce, it means the next block is sent.
+			while (recved>reduce_size_min)
+			{
+				reduce_size_min+=std::min(left_size-reduce_size_min, eachreduce);
+//	            if(print_traceview) std::cout << "xgbtck in_parent_down " << " " << rank << " " << std::setprecision (17) << downtime 
+//					<< " " << 0 << " " << links[parent_index].rank << " "  << reduce_size_min << " " << recved << " " << this->allreduce_cnt << std::endl;
+		    }
+          } else {
+            ReturnType ret = Errno2Return();
+            if (ret != kSuccess) {
+              return ReportError(&links[parent_index], ret);
+            }
+          }
+          if(!set_min_rcv_size)
+              break;
         }
+	    if(print_traceview) std::cout << "xgbtck parent_down " << " " << rank << " " << std::setprecision (17) << downtime << " " << utils::GetTime()-downtime << " " << links[parent_index].rank << std::endl;
       }
     } else {
       // this is root, can use reduce as most recent point
@@ -643,6 +748,7 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
     // can pass message down to childs
     for (int i = 0; i < nlink; ++i) {
       if (i != parent_index && links[i].size_write < size_down_in) {
+	    if(print_traceview) std::cout << "xgbtck child_down " << " " << rank << " " << std::setprecision (17) << utils::GetTime() << " " << 0 << " " << links[i].rank << std::endl;
         ReturnType ret = links[i].WriteFromArray(sendrecvbuf, size_down_in);
         if (ret != kSuccess) {
           return ReportError(&links[i], ret);

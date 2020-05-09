@@ -21,11 +21,14 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/epoll.h>
 #endif  // defined(_WIN32)
 #include <string>
 #include <cstring>
 #include <vector>
 #include <unordered_map>
+#include <emmintrin.h>
+
 #include "utils.h"
 
 #if defined(_WIN32) || defined(__MINGW32__)
@@ -514,22 +517,139 @@ struct PollHelper {
     for (auto kv : fds) {
       fdset.push_back(kv.second);
     }
-    int ret = poll(fdset.data(), fdset.size(), timeout);
-    if (ret == -1) {
-      Socket::Error("Poll");
-    } else {
-      for (auto& pfd : fdset) {
-        auto revents = pfd.revents & pfd.events;
-        if (!revents) {
-          fds.erase(pfd.fd);
-        } else {
-          fds[pfd.fd].events = revents;
+    while (true)
+    {
+      int ret = poll(fdset.data(), fdset.size(), timeout);
+      if (ret == -1) {
+        Socket::Error("Poll");
+        return;
+      } else if (ret >0) {
+        for (auto& pfd : fdset) {
+          auto revents = pfd.revents & pfd.events;
+          if (!revents) {
+            fds.erase(pfd.fd);
+          } else {
+            fds[pfd.fd].events = revents;
+          }
         }
+        return;
+      } else { //ret == 0, timeout
+          break;
       }
     }
   }
 
   std::unordered_map<SOCKET, pollfd> fds;
+};
+struct EPollHelper {
+ private:
+    int epfd;
+    std::vector<epoll_event> events;
+    std::unordered_map<SOCKET, epoll_event> efds;
+ public:
+
+    EPollHelper(){
+      epfd=epoll_create(1);
+    }
+    ~EPollHelper(){
+      for_each(efds.begin(),efds.end(),[this](std::unordered_map<SOCKET, epoll_event>::value_type p){
+                epoll_ctl(this->epfd,EPOLL_CTL_DEL,p.first,&p.second);  
+              });
+    }
+    inline void WatchEvent(SOCKET fd, uint32_t evt){
+      auto iter=efds.find(fd);
+      if (iter==efds.end())
+      {
+        epoll_event ev;
+        ev.data.fd=fd;
+        ev.events = evt;
+        epoll_ctl(epfd,EPOLL_CTL_ADD,fd,&ev);  
+        efds[fd]=ev;
+      }else{
+        auto& ev=iter->second;
+        ev.events |= evt;
+        ev.events |= EPOLLET;
+        epoll_ctl(epfd,EPOLL_CTL_MOD,fd,&ev);  
+      }
+   }
+  /*!
+   * \brief add file descriptor to watch for read
+   * \param fd file descriptor to be watched
+   */
+  inline void WatchRead(SOCKET fd) {
+    WatchEvent(fd,EPOLLIN);
+  }
+  /*!
+   * \brief add file descriptor to watch for write
+   * \param fd file descriptor to be watched
+   */
+  inline void WatchWrite(SOCKET fd) {
+    WatchEvent(fd,EPOLLOUT);
+  }
+  /*!
+   * \brief add file descriptor to watch for exception
+   * \param fd file descriptor to be watched
+   */
+  inline void WatchException(SOCKET fd) {
+    WatchEvent(fd,EPOLLPRI);
+  }
+  /*!
+   * \brief Check if the descriptor is ready for read
+   * \param fd file descriptor to check status
+   */
+  inline bool CheckRead(SOCKET fd){
+    const auto& iter=std::find_if(events.begin(),events.end(),[fd](const epoll_event& evt){return evt.data.fd==fd;});
+    return iter!=events.end() && iter->events&EPOLLIN;
+  }
+  /*!
+   * \brief Check if the descriptor is ready for write
+   * \param fd file descriptor to check status
+   */
+  inline bool CheckWrite(SOCKET fd){
+    const auto& iter=std::find_if(events.begin(),events.end(),[fd](const epoll_event& evt){return evt.data.fd==fd;});
+    return iter!=events.end() && iter->events&EPOLLOUT;
+  }
+  /*!
+   * \brief Check if the descriptor has any exception
+   * \param fd file descriptor to check status
+   */
+  inline bool CheckExcept(SOCKET fd){
+    const auto& iter=std::find_if(events.begin(),events.end(),[fd](const epoll_event& evt){return evt.data.fd==fd;});
+    return iter!=events.end() && iter->events&EPOLLPRI;
+  }
+  /*!
+   * \brief wait for exception event on a single descriptor
+   * \param fd the file descriptor to wait the event for
+   * \param timeout the timeout counter, can be negative, which means wait until the event happen
+   * \return 1 if success, 0 if timeout, and -1 if error occurs
+   */
+  inline static int WaitExcept(SOCKET fd, long timeout = -1) { // NOLINT(*)
+    pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = POLLPRI;
+    return poll(&pfd, 1, timeout);
+  }
+
+  /*!
+   * \brief peform poll on the set defined, read, write, exception
+   * \param timeout specify timeout in milliseconds(ms) if negative, means poll will block
+   * \return
+   */
+  inline void Poll(long timeout = -1) {  // NOLINT(*)
+
+    //reserve not work. 
+    events.resize(efds.size());
+
+    int ret=epoll_wait(epfd,events.data(),efds.size(),timeout);
+    if (ret == -1) {
+      Socket::Error("Poll");
+    }else{
+      events.resize(ret);
+      for_each(efds.begin(),efds.end(),[this](std::unordered_map<SOCKET, epoll_event>::value_type& kv){
+              kv.second.events=0;
+              epoll_ctl(this->epfd,EPOLL_CTL_MOD,kv.first,&kv.second);});
+    }
+  }
 };
 }  // namespace utils
 }  // namespace rabit

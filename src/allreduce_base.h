@@ -569,6 +569,10 @@ class AllreduceBase : public IEngine {
   int rank;
   // world size
   int world_size;
+
+  // minimul reduce size;
+  int tree_reduce_minsize;
+
   // connect retry time
   int connect_retry;
   // enable bootstrap cache 0 false 1 true
@@ -581,6 +585,10 @@ class AllreduceBase : public IEngine {
   bool rabit_timeout = false;
   // Enable TCP node delay
   bool rabit_enable_tcp_no_delay = false;
+
+  bool print_traceview = false;
+  bool set_min_rcv_size = false;
+  utils::EPollHelper watcher;
 };
 }  // namespace engine
 }  // namespace rabit
