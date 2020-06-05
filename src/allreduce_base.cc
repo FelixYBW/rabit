@@ -131,6 +131,8 @@ bool AllreduceBase::Init(int argc, char* argv[]) {
 }
 
 bool AllreduceBase::Shutdown(void) {
+  if (!print_traceview)
+    std::cout << "xgbtck allreduce " << rank << " " <<  std::setprecision (12) << utils::GetTime() << " " << elapsed << " " << callcnt << std::endl;
   try {
     for (size_t i = 0; i < all_links.size(); ++i) {
       all_links[i].sock.Close();
@@ -196,20 +198,20 @@ void AllreduceBase::SetParam(const char *name, const char *val) {
   if (!strcmp(name, "rabit_tracker_port")) tracker_port = atoi(val);
   if (!strcmp(name, "rabit_task_id")) task_id = val;
   if (val != "NULL")
-	if (!strcmp(name, "DMLC_TRACKER_URI")) tracker_uri = val;
+  if (!strcmp(name, "DMLC_TRACKER_URI")) tracker_uri = val;
   if (!strcmp(name, "DMLC_TRACKER_PORT")) tracker_port = atoi(val);
   if (!strcmp(name, "DMLC_TASK_ID")) task_id = val;
   if (!strcmp(name, "DMLC_ROLE")) dmlc_role = val;
   if (!strcmp(name, "rabit_world_size")) world_size = atoi(val);
   if (!strcmp(name, "rabit_hadoop_mode")) hadoop_mode = utils::StringToBool(val);
   if (!strcmp(name, "rabit_tree_reduce_minsize")){
-	  tree_reduce_minsize =  atoi(val);
-	  std::cout << "set tree_reduce_minsize to " << tree_reduce_minsize << std::endl;
+    tree_reduce_minsize =  atoi(val);
+    std::cout << "set tree_reduce_minsize to " << tree_reduce_minsize << std::endl;
   }
   if (!strcmp(name, "rabit_print_traceview")) print_traceview = utils::StringToBool(val);
   if (!strcmp(name, "rabit_set_min_rcv_size")) {
-	  set_min_rcv_size = utils::StringToBool(val);
-	  std::cout << "set set_min_rcv_size to " << set_min_rcv_size << std::endl;
+    set_min_rcv_size = utils::StringToBool(val);
+    std::cout << "set set_min_rcv_size to " << set_min_rcv_size << std::endl;
   }
   if (!strcmp(name, "rabit_reduce_ring_mincount")) {
     reduce_ring_mincount = atoi(val);
@@ -329,7 +331,7 @@ bool AllreduceBase::ReConnectLinks(const char *cmd) {
 
     fprintf(stdout, "task %s got new rank %d\n", task_id.c_str(), rank);
     
-	std::cout << "reconnectlinks rank = " << rank << " taskid = " << task_id << std::endl;
+  std::cout << "reconnectlinks rank = " << rank << " taskid = " << task_id << std::endl;
 
 
     Assert(tracker.RecvAll(&num_neighbors, sizeof(num_neighbors)) == \
@@ -469,7 +471,7 @@ bool AllreduceBase::ReConnectLinks(const char *cmd) {
     std::for_each(tree_links.plinks.begin(),tree_links.plinks.end(),[](const LinkRecord *a){ std::cout << a->rank << " ";});
     std::cout << std::endl;
 
-	std::sort(tree_links.plinks.begin(),tree_links.plinks.end(),[](const LinkRecord * a, const LinkRecord * b) {
+  std::sort(tree_links.plinks.begin(),tree_links.plinks.end(),[](const LinkRecord * a, const LinkRecord * b) {
         return a->rank > b->rank;   
     });
     parent_index = std::distance(tree_links.plinks.begin(),
@@ -515,24 +517,30 @@ AllreduceBase::TryAllreduce(void *sendrecvbuf_,
                             size_t count,
                             ReduceFunction reducer) {
 
-//	uint64_t start = __rdtsc();
-    double start=0;
-    if(print_traceview) start=utils::GetTime();
-    AllreduceBase::ReturnType ret;
-    if (count > reduce_ring_mincount) {
-		ret = this->TryAllreduceRing(sendrecvbuf_, type_nbytes, count, reducer);
-	} else {
-		ret = this->TryAllreduceTree(sendrecvbuf_, type_nbytes, count, reducer);
-	}
-    if(print_traceview){
-      double end = utils::GetTime();
-      double delta = end - start;
-//	uint64_t end = __rdtsc();
-//	uint64_t delta = end - start;
+//  uint64_t start = __rdtsc();
+  this->allreduce_cnt++;
+  double start = utils::GetTime();
+  AllreduceBase::ReturnType ret;
+  if (count > reduce_ring_mincount) {
+    ret = this->TryAllreduceRing(sendrecvbuf_, type_nbytes, count, reducer);
+  } else {
+    ret = this->TryAllreduceTree(sendrecvbuf_, type_nbytes, count, reducer);
+  }
+  double end = utils::GetTime();
+//   uint64_t end = __rdtsc();
+  double delta = (end - start);
 
-      std::cout << "xgbtck allreduce " << " " << rank << " " << std::setprecision (17) << start << " " << delta << " " << type_nbytes*count << std::endl;
-    }
-	return ret;
+  elapsed+=delta;
+  callcnt++;
+  if(print_traceview) std::cout << "xgbtck allreduce " << " " << this->rank << " " <<  start << " " <<  delta << " " << type_nbytes*count << " " << allreduce_cnt << std::endl;
+
+  if (!print_traceview && end-last_print>1){
+    std::cout << "xgbtck allreduce " << rank << " " <<  std::setprecision (12) << end << " " << elapsed << " " << callcnt << std::endl;
+    elapsed=0;
+    callcnt=0;
+    last_print=end;
+  }
+  return ret;
 }
 /*!
  * \brief perform in-place allreduce, on sendrecvbuf,
@@ -617,7 +625,7 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
     if(print_traceview){
       double end_time = utils::GetTime();
       double delta = end_time - start_time;
-	  std::cout << "xgbtck poll " << " " << rank << " " << std::setprecision (17) << start_time << " " << delta << " " << "-1" << std::endl;
+    std::cout << "xgbtck poll " << " " << rank << " " << std::setprecision (17) << start_time << " " << delta << " " << "-1" << std::endl;
     }
     // exception handling
     for (int i = 0; i < nlink; ++i) {
@@ -629,9 +637,12 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
     // read data from childs
     for (int i = 0; i < nlink; ++i) {
       if (i != parent_index && watcher.CheckRead(links[i].sock)) {
-        ReturnType ret = links[i].ReadToRingBuffer(size_up_out, total_size);
-        if (ret != kSuccess) {
-          return ReportError(&links[i], ret);
+        // make sure to receive minimal reducer size since each child reduce and sends the minimal reducer size
+        while (links[i].size_read < total_size && links[i].size_read - size_up_reduce < eachreduce) {
+          ReturnType ret = links[i].ReadToRingBuffer(size_up_out, total_size);
+          if (ret != kSuccess) {
+            return ReportError(&links[i], ret);
+          }
         }
       }
     }
@@ -651,7 +662,12 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
       utils::Assert(buffer_size != 0, "must assign buffer_size");
       // round to type_n4bytes
       max_reduce = (max_reduce / type_nbytes * type_nbytes);
- 
+      
+      // if max reduce is less than total size, we reduce multiple times of
+      // eachreduce size
+      if (max_reduce < total_size)
+          max_reduce = max_reduce - max_reduce % eachreduce;
+
       // peform reduce, can be at most two rounds
       while (size_up_reduce < max_reduce) {
         // start position
@@ -659,13 +675,6 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
         // peform read till end of buffer
         size_t nread = std::min(buffer_size - start,
                                 max_reduce - size_up_reduce);
-        if (nread<eachreduce && (size_up_reduce+nread)<total_size)
-        {
-            break;
-        }
-        nread = std::min(eachreduce,total_size-size_up_reduce);
-
-        
         utils::Assert(nread % type_nbytes == 0, "Allreduce: size check");
         for (int i = 0; i < nlink; ++i) {
           if (i != parent_index) {
@@ -676,7 +685,7 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
                     MPI::Datatype(type_nbytes));
             //double end_time = utils::GetTime();
             //double delta = end_time - start_time;
-	        if(print_traceview) std::cout << "xgbtck reducer " << " " << rank << " " << std::setprecision (17) << utils::GetTime() << " " << nread << " " << links[i].rank << std::endl;
+      if(print_traceview) std::cout << "xgbtck reducer " << " " << rank << " " << std::setprecision (17) << utils::GetTime() << " " << nread << " " << links[i].rank << std::endl;
             //reducer takes very little time
           }
         }
@@ -689,8 +698,8 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
       // pass message up to parent, can pass data that are already been reduced
       if (size_up_out < size_up_reduce) {
         ssize_t len = links[parent_index].sock.
-            Send(sendrecvbuf + size_up_out, size_up_reduce - size_up_out);
-	    if(print_traceview) std::cout << "xgbtck parent_up " << " " << rank << " " << std::setprecision (17) << utils::GetTime() << " " << len << " " << links[parent_index].rank << std::endl;
+        Send(sendrecvbuf + size_up_out, size_up_reduce - size_up_out);
+        if(print_traceview) std::cout << "xgbtck parent_up " << " " << rank << " " << std::setprecision (17) << utils::GetTime() << " " << len << " " << links[parent_index].rank << std::endl;
         if (len != -1) {
           size_up_out += static_cast<size_t>(len);
         } else {
@@ -703,17 +712,16 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
       // read data from parent
       if (watcher.CheckRead(links[parent_index].sock) &&
           total_size > size_down_in) {
-		size_t left_size=total_size-size_down_in;
+        size_t left_size=total_size-size_down_in;
         size_t reduce_size_min=std::min(left_size, eachreduce);
         size_t recved=0;
         if(print_traceview) downtime=utils::GetTime();
         while (recved<reduce_size_min)
         {
           ssize_t len = links[parent_index].sock.
-              Recv(sendrecvbuf + size_down_in, total_size - size_down_in);
+          Recv(sendrecvbuf + size_down_in, total_size - size_down_in);
 
           if (len == 0) {
-
             links[parent_index].sock.Close();
             return ReportError(&links[parent_index], kRecvZeroLen);
           }
@@ -723,24 +731,24 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
                           "Allreduce: boundary error");
             recved+=len;
 
-			//if it receives more data than each reduce, it means the next block is sent.
-			while (recved>reduce_size_min)
-			{
-				reduce_size_min+=std::min(left_size-reduce_size_min, eachreduce);
-//	            if(print_traceview) std::cout << "xgbtck in_parent_down " << " " << rank << " " << std::setprecision (17) << downtime 
-//					<< " " << 0 << " " << links[parent_index].rank << " "  << reduce_size_min << " " << recved << " " << this->allreduce_cnt << std::endl;
-		    }
-          } else {
-            ReturnType ret = Errno2Return();
-            if (ret != kSuccess) {
-              return ReportError(&links[parent_index], ret);
+            //if it receives more data than each reduce, it means the next block is sent.
+            while (recved>reduce_size_min)
+            {
+              reduce_size_min+=std::min(left_size-reduce_size_min, eachreduce);
+//            if(print_traceview) std::cout << "xgbtck in_parent_down " << " " << rank << " " << std::setprecision (17) << downtime 
+//                    << " " << 0 << " " << links[parent_index].rank << " "  << reduce_size_min << " " << recved << " " << this->allreduce_cnt << std::endl;
             }
-          }
-          if(!set_min_rcv_size)
+          } else {
+              ReturnType ret = Errno2Return();
+              if (ret != kSuccess) {
+                return ReportError(&links[parent_index], ret);
+              }
+            }
+            if(!set_min_rcv_size)
               break;
+          }
+          if(print_traceview) std::cout << "xgbtck parent_down " << " " << rank << " " << std::setprecision (17) << downtime << " " << utils::GetTime()-downtime << " " << links[parent_index].rank << std::endl;
         }
-	    if(print_traceview) std::cout << "xgbtck parent_down " << " " << rank << " " << std::setprecision (17) << downtime << " " << utils::GetTime()-downtime << " " << links[parent_index].rank << std::endl;
-      }
     } else {
       // this is root, can use reduce as most recent point
       size_down_in = size_up_out = size_up_reduce;
@@ -748,7 +756,7 @@ AllreduceBase::TryAllreduceTree(void *sendrecvbuf_,
     // can pass message down to childs
     for (int i = 0; i < nlink; ++i) {
       if (i != parent_index && links[i].size_write < size_down_in) {
-	    if(print_traceview) std::cout << "xgbtck child_down " << " " << rank << " " << std::setprecision (17) << utils::GetTime() << " " << 0 << " " << links[i].rank << std::endl;
+      if(print_traceview) std::cout << "xgbtck child_down " << " " << rank << " " << std::setprecision (17) << utils::GetTime() << " " << 0 << " " << links[i].rank << std::endl;
         ReturnType ret = links[i].WriteFromArray(sendrecvbuf, size_down_in);
         if (ret != kSuccess) {
           return ReportError(&links[i], ret);

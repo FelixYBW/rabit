@@ -568,7 +568,7 @@ struct EPollHelper {
       }else{
         auto& ev=iter->second;
         ev.events |= evt;
-        ev.events |= EPOLLET;
+//        ev.events |= EPOLLET;
         epoll_ctl(epfd,EPOLL_CTL_MOD,fd,&ev);  
       }
    }

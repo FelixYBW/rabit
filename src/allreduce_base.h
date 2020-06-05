@@ -585,9 +585,12 @@ class AllreduceBase : public IEngine {
   bool rabit_timeout = false;
   // Enable TCP node delay
   bool rabit_enable_tcp_no_delay = false;
-
+  double last_print=0;
+  double elapsed=0;
+  int callcnt=0;
   bool print_traceview = false;
   bool set_min_rcv_size = false;
+  int allreduce_cnt=0;
   utils::EPollHelper watcher;
 };
 }  // namespace engine
